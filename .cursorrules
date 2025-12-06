@@ -1,0 +1,436 @@
+# Senior Python Developer - Clean Architecture Standards
+
+## Core Principles
+
+### Clean Architecture
+- **Dependency Rule**: Dependencies MUST point inward. Inner layers know nothing about outer layers.
+- **Layer Order** (innermost to outermost):
+  1. **Domain/Entities**: Business entities, value objects, domain exceptions
+  2. **Application/Use Cases**: Business logic, interfaces (ports)
+  3. **Adapters**: Controllers, repositories, presenters, DTOs
+  4. **Infrastructure**: FastAPI, database, external services, frameworks
+
+### SOLID Principles (Strict Enforcement)
+- **Single Responsibility**: Each class has ONE reason to change
+- **Open/Closed**: Extend through interfaces, NEVER modify existing code
+- **Liskov Substitution**: Interfaces must have proper contracts (use ABC)
+- **Interface Segregation**: Many small, focused protocols over large interfaces
+- **Dependency Inversion**: All dependencies through abstractions (ABC, Protocol)
+
+## Code Standards
+
+### Type Hints (Mandatory)
+```python
+# GOOD: Full type hints
+def process_user(user_id: int, options: dict[str, Any]) -> Result[User, UserError]:
+    ...
+
+# BAD: No type hints
+def process_user(user_id, options):
+    ...
+```
+
+### Dependency Injection
+```python
+# GOOD: Use FastAPI Depends() for DI
+@router.post("/users")
+async def create_user(
+    request: CreateUserRequest,
+    use_case: RegisterUser = Depends(get_register_user_use_case),
+) -> UserResponse:
+    result = await use_case.execute(request)
+    return present_user(result)
+
+# BAD: Direct instantiation
+@router.post("/users")
+async def create_user(request: CreateUserRequest):
+    repository = UserRepository()  # Tight coupling!
+    use_case = RegisterUser(repository)
+    ...
+```
+
+### Error Handling - Result Monad
+```python
+# GOOD: Return Result for expected errors
+def authenticate(email: str, password: str) -> Result[User, AuthError]:
+    user = repository.find_by_email(email)
+    if not user:
+        return Err(AuthError.USER_NOT_FOUND)
+    if not verify_password(password, user.password_hash):
+        return Err(AuthError.INVALID_PASSWORD)
+    return Ok(user)
+
+# BAD: Exceptions for control flow
+def authenticate(email: str, password: str) -> User:
+    user = repository.find_by_email(email)
+    if not user:
+        raise Exception("User not found")  # Don't use generic exceptions
+    ...
+```
+
+### Domain Exceptions (Use for invariant violations)
+```python
+# GOOD: Domain exceptions for business rule violations
+class InvalidEmailError(DomainException):
+    """Raised when email format is invalid."""
+    pass
+
+class Email(ValueObject):
+    def __init__(self, value: str) -> None:
+        if not self._is_valid(value):
+            raise InvalidEmailError(f"Invalid email: {value}")
+        self._value = value
+```
+
+### Use Cases (Application Layer)
+```python
+# GOOD: Use case with port (interface)
+class RegisterUser:
+    """Use case for user registration."""
+
+    def __init__(
+        self,
+        user_repository: IUserRepository,  # Port (interface)
+        password_hasher: IPasswordHasher,  # Port (interface)
+        event_publisher: IEventPublisher,  # Port (interface)
+    ) -> None:
+        self._user_repository = user_repository
+        self._password_hasher = password_hasher
+        self._event_publisher = event_publisher
+
+    async def execute(self, request: RegisterUserRequest) -> Result[User, RegistrationError]:
+        """Execute user registration use case."""
+        # Validation
+        email_result = Email.create(request.email)
+        if email_result.is_err():
+            return Err(RegistrationError.INVALID_EMAIL)
+
+        # Business logic
+        existing_user = await self._user_repository.find_by_email(email_result.unwrap())
+        if existing_user:
+            return Err(RegistrationError.EMAIL_ALREADY_EXISTS)
+
+        # Create entity
+        password_hash = await self._password_hasher.hash(request.password)
+        user = User.create(
+            email=email_result.unwrap(),
+            password_hash=password_hash,
+            name=request.name,
+        )
+
+        # Persist
+        await self._user_repository.save(user)
+
+        # Side effects
+        await self._event_publisher.publish(UserRegistered(user.id))
+
+        return Ok(user)
+
+# BAD: Business logic in controller
+@router.post("/register")
+async def register(request: RegisterRequest, db: Session):
+    user = User(email=request.email)  # No validation!
+    db.add(user)
+    db.commit()
+    return user
+```
+
+### Entities (Domain Layer)
+```python
+# GOOD: Rich domain entity with business rules
+@dataclass
+class User(BaseEntity):
+    """User entity with business rules."""
+
+    id: UserId
+    email: Email
+    password_hash: PasswordHash
+    name: str
+    status: UserStatus
+    created_at: datetime
+    updated_at: datetime
+
+    @classmethod
+    def create(
+        cls,
+        email: Email,
+        password_hash: PasswordHash,
+        name: str,
+    ) -> "User":
+        """Factory method for creating new users."""
+        return cls(
+            id=UserId.generate(),
+            email=email,
+            password_hash=password_hash,
+            name=name,
+            status=UserStatus.ACTIVE,
+            created_at=datetime.now(UTC),
+            updated_at=datetime.now(UTC),
+        )
+
+    def deactivate(self) -> None:
+        """Deactivate user account (business rule)."""
+        if self.status == UserStatus.DELETED:
+            raise UserAlreadyDeletedException()
+        self.status = UserStatus.INACTIVE
+        self.updated_at = datetime.now(UTC)
+
+    def can_login(self) -> bool:
+        """Business rule: only active users can login."""
+        return self.status == UserStatus.ACTIVE
+
+# BAD: Anemic domain model
+class User:
+    def __init__(self, email, password):
+        self.email = email
+        self.password = password
+```
+
+### Value Objects (Immutable)
+```python
+# GOOD: Immutable value object with validation
+@dataclass(frozen=True)
+class Email(ValueObject):
+    """Email value object."""
+
+    value: str
+
+    @classmethod
+    def create(cls, value: str) -> Result["Email", str]:
+        """Create email with validation."""
+        if not cls._is_valid(value):
+            return Err(f"Invalid email format: {value}")
+        return Ok(cls(value=value.lower().strip()))
+
+    @staticmethod
+    def _is_valid(email: str) -> bool:
+        """Validate email format."""
+        pattern = r'^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$'
+        return bool(re.match(pattern, email))
+
+    def __str__(self) -> str:
+        return self.value
+
+# BAD: Mutable, no validation
+class Email:
+    def __init__(self, value):
+        self.value = value  # Can be changed!
+```
+
+### Repositories (Adapters Layer)
+```python
+# GOOD: Repository implements port interface
+class IUserRepository(ABC):
+    """Port (interface) for user repository."""
+
+    @abstractmethod
+    async def find_by_id(self, user_id: UserId) -> Optional[User]:
+        """Find user by ID."""
+        ...
+
+    @abstractmethod
+    async def find_by_email(self, email: Email) -> Optional[User]:
+        """Find user by email."""
+        ...
+
+    @abstractmethod
+    async def save(self, user: User) -> None:
+        """Save user."""
+        ...
+
+class UserRepository(IUserRepository):
+    """PostgreSQL implementation of user repository."""
+
+    def __init__(self, session: AsyncSession) -> None:
+        self._session = session
+
+    async def find_by_email(self, email: Email) -> Optional[User]:
+        """Find user by email."""
+        stmt = select(UserModel).where(UserModel.email == str(email))
+        result = await self._session.execute(stmt)
+        user_model = result.scalar_one_or_none()
+        return self._to_entity(user_model) if user_model else None
+
+    def _to_entity(self, model: UserModel) -> User:
+        """Convert database model to domain entity."""
+        return User(
+            id=UserId(model.id),
+            email=Email(model.email),
+            # ... map all fields
+        )
+```
+
+### Controllers (Adapters Layer)
+```python
+# GOOD: Thin controller, delegates to use case
+class UserController:
+    """Controller for user endpoints."""
+
+    def __init__(self, register_use_case: RegisterUser) -> None:
+        self._register_use_case = register_use_case
+
+    async def register(self, request: RegisterUserRequest) -> Response:
+        """Handle user registration request."""
+        result = await self._register_use_case.execute(request)
+
+        if result.is_err():
+            error = result.unwrap_err()
+            return self._handle_error(error)
+
+        user = result.unwrap()
+        return UserResponse(
+            id=str(user.id),
+            email=str(user.email),
+            name=user.name,
+        )
+
+    def _handle_error(self, error: RegistrationError) -> Response:
+        """Map domain errors to HTTP responses."""
+        error_map = {
+            RegistrationError.EMAIL_ALREADY_EXISTS: (409, "Email already registered"),
+            RegistrationError.INVALID_EMAIL: (400, "Invalid email format"),
+        }
+        status_code, message = error_map.get(error, (500, "Internal error"))
+        return ErrorResponse(status_code=status_code, message=message)
+
+# BAD: Business logic in controller
+@router.post("/register")
+async def register(request: RegisterRequest, db: Session):
+    if "@" not in request.email:  # Business logic in controller!
+        raise HTTPException(400)
+    user = User(email=request.email)
+    db.add(user)
+    return user
+```
+
+### Testing - TDD Approach
+```python
+# GOOD: Test first, then implement
+class TestRegisterUser:
+    """Test suite for RegisterUser use case."""
+
+    async def test_register_user_with_valid_data_succeeds(self) -> None:
+        """GIVEN valid user data
+        WHEN registering a user
+        THEN user is created successfully
+        """
+        # Arrange
+        repository = MockUserRepository()
+        hasher = MockPasswordHasher()
+        use_case = RegisterUser(repository, hasher)
+        request = RegisterUserRequest(
+            email="test@example.com",
+            password="SecurePass123!",
+            name="Test User",
+        )
+
+        # Act
+        result = await use_case.execute(request)
+
+        # Assert
+        assert result.is_ok()
+        user = result.unwrap()
+        assert user.email.value == "test@example.com"
+        assert repository.save_called_once()
+
+    async def test_register_user_with_existing_email_fails(self) -> None:
+        """GIVEN an existing user with email
+        WHEN registering with same email
+        THEN registration fails with EMAIL_ALREADY_EXISTS
+        """
+        # Arrange
+        existing_email = Email.create("test@example.com").unwrap()
+        repository = MockUserRepository(existing_users=[
+            User.create(existing_email, PasswordHash("hash"), "Existing")
+        ])
+        use_case = RegisterUser(repository, MockPasswordHasher())
+        request = RegisterUserRequest(email="test@example.com", password="pass", name="New")
+
+        # Act
+        result = await use_case.execute(request)
+
+        # Assert
+        assert result.is_err()
+        assert result.unwrap_err() == RegistrationError.EMAIL_ALREADY_EXISTS
+```
+
+## Documentation Standards
+
+### Docstrings (Google Style)
+```python
+def calculate_total_price(items: list[Item], discount: Discount | None = None) -> Money:
+    """Calculate total price with optional discount.
+
+    Args:
+        items: List of items to calculate total for
+        discount: Optional discount to apply
+
+    Returns:
+        Total price as Money value object
+
+    Raises:
+        EmptyCartError: If items list is empty
+        InvalidDiscountError: If discount is expired
+
+    Examples:
+        >>> items = [Item(price=Money(100)), Item(price=Money(200))]
+        >>> calculate_total_price(items)
+        Money(300)
+    """
+    ...
+```
+
+## Async/Await Guidelines
+```python
+# GOOD: Use async for I/O operations
+async def get_user(user_id: int) -> User:
+    """Fetch user from database (I/O operation)."""
+    async with session() as db:
+        return await db.get(User, user_id)
+
+# GOOD: Synchronous for pure computation
+def calculate_discount(price: Money, percentage: int) -> Money:
+    """Calculate discount (pure computation)."""
+    return price * (percentage / 100)
+
+# BAD: Unnecessary async
+async def add_numbers(a: int, b: int) -> int:
+    return a + b  # No I/O, shouldn't be async
+```
+
+## Project Structure Rules
+- **Domain layer**: No external dependencies (only Python stdlib)
+- **Application layer**: Can depend on Domain, no external frameworks
+- **Adapters layer**: Implements ports from Application, no framework details
+- **Infrastructure layer**: FastAPI, SQLAlchemy, external services
+
+## Forbidden Practices
+❌ Business logic in controllers/routes
+❌ Direct database access from use cases (use repositories)
+❌ Importing infrastructure in domain/application layers
+❌ Mutable value objects
+❌ Generic exceptions (use domain exceptions)
+❌ God classes (> 200 lines)
+❌ Circular dependencies
+❌ Global state
+❌ Magic numbers/strings
+❌ Commented-out code
+
+## Code Review Checklist
+✅ All functions have type hints
+✅ Docstrings for public APIs
+✅ Tests written before implementation (TDD)
+✅ Dependencies point inward
+✅ Business rules in domain/application layers
+✅ Repositories behind interfaces
+✅ Error handling with Result monad
+✅ Value objects are immutable
+✅ Single responsibility per class
+✅ No code duplication
+
+## Formatting
+- Line length: 100 characters
+- Use Black formatter
+- Import order: stdlib → third-party → local (Ruff sorts)
+- One import per line for clarity
+
