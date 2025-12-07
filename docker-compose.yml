@@ -1,171 +1,21 @@
 version: '3.9'
 
-services:
-  # PostgreSQL for Auth Service
-  auth-db:
-    image: postgres:16-alpine
-    container_name: ai_middle_auth_db
-    environment:
-      POSTGRES_DB: auth_db
-      POSTGRES_USER: auth_user
-      POSTGRES_PASSWORD: auth_password
-    ports:
-      - "5442:5432"
-    volumes:
-      - auth_db_data:/var/lib/postgresql/data
-    healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U auth_user -d auth_db"]
-      interval: 5s
-      timeout: 5s
-      retries: 5
+# AI_Middle services have been removed
+# All middleware functionality is now handled by AI_Infra or moved to other services
+#
+# Previously contained:
+# - auth-service (port 8001)
+# - gateway-service (port 8002) 
+# - aggregation-service (port 8003)
+# - gateway-db (PostgreSQL on port 5433)
+#
+# These services have been consolidated into AI_Infra infrastructure
+# or are being refactored into the application layer.
 
-  # PostgreSQL for Gateway Service
-  gateway-db:
-    image: postgres:16-alpine
-    container_name: ai_middle_gateway_db
-    environment:
-      POSTGRES_DB: gateway_db
-      POSTGRES_USER: gateway_user
-      POSTGRES_PASSWORD: gateway_password
-    ports:
-      - "5433:5432"
-    volumes:
-      - gateway_db_data:/var/lib/postgresql/data
-    healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U gateway_user -d gateway_db"]
-      interval: 5s
-      timeout: 5s
-      retries: 5
-
-  # PostgreSQL for Aggregation Service
-  aggregation-db:
-    image: postgres:16-alpine
-    container_name: ai_middle_aggregation_db
-    environment:
-      POSTGRES_DB: aggregation_db
-      POSTGRES_USER: aggregation_user
-      POSTGRES_PASSWORD: aggregation_password
-    ports:
-      - "5434:5432"
-    volumes:
-      - aggregation_db_data:/var/lib/postgresql/data
-    healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U aggregation_user -d aggregation_db"]
-      interval: 5s
-      timeout: 5s
-      retries: 5
-
-  # Shared Redis
-  redis:
-    image: redis:7-alpine
-    container_name: ai_middle_redis
-    ports:
-      - "6389:6379"
-    volumes:
-      - redis_data:/data
-    healthcheck:
-      test: ["CMD", "redis-cli", "ping"]
-      interval: 5s
-      timeout: 3s
-      retries: 5
-    command: redis-server --appendonly yes
-
-  # Auth Service
-  auth-service:
-    build:
-      context: .
-      dockerfile: ./services/auth-service/Dockerfile
-    container_name: ai_middle_auth_service
-    ports:
-      - "8001:8000"
-    environment:
-      - DATABASE_HOST=auth-db
-      - DATABASE_PORT=5432
-      - DATABASE_NAME=auth_db
-      - DATABASE_USER=auth_user
-      - DATABASE_PASSWORD=auth_password
-      - REDIS_HOST=redis
-      - REDIS_PORT=6379
-      - JWT_SECRET_KEY=dev-secret-key-change-in-production
-      - JWT_ALGORITHM=HS256
-      - ACCESS_TOKEN_EXPIRE_MINUTES=30
-      - REFRESH_TOKEN_EXPIRE_DAYS=7
-      - LOG_LEVEL=DEBUG
-    depends_on:
-      auth-db:
-        condition: service_healthy
-      redis:
-        condition: service_healthy
-    volumes:
-      - ./services/auth-service/src:/app/src:ro
-    command: uvicorn src.infrastructure.api.main:app --host 0.0.0.0 --port 8000 --reload
-
-  # Gateway Service
-  gateway-service:
-    build:
-      context: .
-      dockerfile: ./services/gateway-service/Dockerfile
-    container_name: ai_middle_gateway_service
-    ports:
-      - "8002:8000"
-    environment:
-      - DATABASE_HOST=gateway-db
-      - DATABASE_PORT=5432
-      - DATABASE_NAME=gateway_db
-      - DATABASE_USER=gateway_user
-      - DATABASE_PASSWORD=gateway_password
-      - REDIS_HOST=redis
-      - REDIS_PORT=6379
-      - AUTH_SERVICE_URL=http://auth-service:8000
-      - AGGREGATION_SERVICE_URL=http://aggregation-service:8000
-      - LOG_LEVEL=DEBUG
-      - RATE_LIMIT_PER_MINUTE=60
-      - CIRCUIT_BREAKER_THRESHOLD=5
-    depends_on:
-      gateway-db:
-        condition: service_healthy
-      redis:
-        condition: service_healthy
-      auth-service:
-        condition: service_started
-    volumes:
-      - ./services/gateway-service/src:/app/src:ro
-    command: uvicorn src.infrastructure.api.main:app --host 0.0.0.0 --port 8000 --reload
-
-  # Aggregation Service
-  aggregation-service:
-    build:
-      context: .
-      dockerfile: ./services/aggregation-service/Dockerfile
-    container_name: ai_middle_aggregation_service
-    ports:
-      - "8003:8000"
-    environment:
-      - DATABASE_HOST=aggregation-db
-      - DATABASE_PORT=5432
-      - DATABASE_NAME=aggregation_db
-      - DATABASE_USER=aggregation_user
-      - DATABASE_PASSWORD=aggregation_password
-      - REDIS_HOST=redis
-      - REDIS_PORT=6379
-      - LOG_LEVEL=DEBUG
-      - CACHE_TTL_SECONDS=300
-    depends_on:
-      aggregation-db:
-        condition: service_healthy
-      redis:
-        condition: service_healthy
-    volumes:
-      - ./services/aggregation-service/src:/app/src:ro
-    command: uvicorn src.infrastructure.api.main:app --host 0.0.0.0 --port 8000 --reload
-
-volumes:
-  auth_db_data:
-  gateway_db_data:
-  aggregation_db_data:
-  redis_data:
+services: {}
 
 networks:
   default:
     name: ai_middle_network
 
+volumes: {}
